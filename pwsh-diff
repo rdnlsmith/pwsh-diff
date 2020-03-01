@@ -1,0 +1,342 @@
+#!/usr/bin/env pwsh
+
+param (
+    [Parameter(Mandatory=$true, ValueFromPipeline=$true)][string[]]$input
+)
+
+$VERSION = "0.1.0"
+$COLOR_REGEX = "\x1b\[[0-9;]*m"
+
+class HighlightTheme {
+    [string]$NormalColor
+    [string]$HighlightColor
+}
+
+class LinePair {
+    [string]$RemovedLine
+    [string]$AddedLine
+}
+
+class Hunk {
+    [string[]]$RemovedLines
+    [string[]]$AddedLines
+}
+
+function New-Hunk {
+    return [Hunk]@{
+        RemovedLines = @()
+        AddedLines = @()
+    }
+}
+
+function Get-Color {
+    param (
+        [string]$str
+    )
+
+    if (!$str -or $str -eq "reset") {
+        return "`e[0m";
+    }
+
+    # Replace named colors with numeric colors
+    $color_hash = @{
+        "red" = "160";
+        "blue" = "21";
+        "green" = "34";
+        "yellow" = "226";
+        "orange" = "214";
+        "purple" = "98";
+        "white" = "15";
+        "black" = "0";
+    }
+
+    foreach ($color in $color_hash.GetEnumerator()) {
+        $str = $str -Replace $color.Name, $color.Value
+    }
+
+    # Extract foreground, background, and command
+    $match = Select-String -InputObject $str -Pattern "(\d+)?_?(\w+)?" `
+        | Select-Object -ExpandProperty Matches `
+        | Select-Object -First 1
+    if ($match.Groups) {
+        $fg = $match.Groups[1].Value
+        $cmd = $match.Groups[2].Value
+    }
+
+    $match = Select-String -InputObject $str -Pattern "on_?(\d+)" `
+        | Select-Object -ExpandProperty Matches `
+        | Select-Object -First 1
+
+    if ($match.Groups) {
+        $bg = $match.Groups[1].Value
+    }
+
+    if ($cmd) {
+        # Convert named commands to numeric commands
+        $cmd_hash = @{
+            "bold" = "1";
+            "italic" = "3";
+            "underline" = "4";
+            "blink" = "5";
+            "inverse" = "7";
+        }
+
+        foreach ($command in $cmd_hash.GetEnumerator()) {
+            $cmd = $cmd -Replace $command.Name, $command.Value
+        }
+    }
+
+    # Build ANSI sequence
+    $seq = "";
+
+    if ($cmd) {
+        $seq += "`e[$cmd`m"
+    }
+
+    if ($fg) {
+        $seq += "`e[38;5;$fg`m"
+    }
+
+    if ($bg) {
+        $seq += "`e[48;5;$bg`m"
+    }
+
+    return $seq
+}
+
+# Fetch a text item from the git config
+function Get-GitConfigItem {
+    param (
+        [string]$key
+    )
+
+    return $(git config --get "$key")
+}
+
+# Fetch a boolean item from the git config
+function Get-GitConfigBoolean {
+    param (
+        [string]$key
+    )
+
+    $text = Get-GitConfigItem $key
+
+    if ($text -and $text -eq "true") {
+        return $true
+    } else {
+        return $false
+    }
+}
+
+function Get-VisibleString {
+    param (
+        [string]$str
+    )
+
+    return $str -Replace $COLOR_REGEX, ""
+}
+
+# Count the visible width of a string, excluding any terminal color sequences.
+function Measure-VisibleWidth {
+    param (
+        [string]$str
+    )
+
+    $str = Get-VisibleString $str
+    return $str.Length
+}
+
+# Return a substring of $str, omitting $len visible characters from the
+# beginning, where terminal color sequences do not count as visible.
+function Get-VisibleSubString {
+    param (
+        [string]$str,
+        [int]$len
+    )
+
+    $str = Get-VisibleString $str
+    return $str.Substring(0, $len)
+}
+
+function Split-Line {
+    param (
+        [string]$line
+    )
+
+    return $line.ToCharArray()
+    # return Select-String -InputObject $line -Pattern "($COLOR_REGEX|.)" -AllMatches `
+    #     | ForEach-Object { $_.Matches.Value }
+}
+
+function Set-LineHighlight {
+    param (
+        [string]$line,
+        [int]$prefixEnd,
+        [int]$suffixStart,
+        [HighlightTheme]$theme
+    )
+
+    $reset = Get-Color "reset"
+
+    # if ($prefixEnd -gt $suffixStart) {
+    #     return -join ("$($theme.NormalColor)", $line, "$reset")
+    # }
+
+    $prefix = $line.Substring(0, $prefixEnd)
+    $mid = $line.Substring($prefixEnd, $suffixStart - $prefixEnd + 1)
+    $suffix = $line.Substring($suffixStart + 1)
+
+    return -join ( `
+        "$($theme.NormalColor)", "$prefix", "$reset", `
+        "$($theme.HighlightColor)", "$mid", "$reset", `
+        "$($theme.NormalColor)", "$suffix", "$reset")
+}
+
+function Set-LinePairHighlight {
+    param (
+        [LinePair]$lines,
+        [HighlightTheme]$removedTheme,
+        [HighlightTheme]$addedTheme
+    )
+
+    $removedLineVis = Get-VisibleString $lines.RemovedLine
+    $removedLineSplit = Split-Line $(Get-VisibleString $lines.RemovedLine)
+
+    $addedLineVis = Get-VisibleString $lines.AddedLine
+    $addedLineSplit = Split-Line $(Get-VisibleString $lines.AddedLine)
+
+    # Find common prefix
+    $r_prefix = 0
+    $a_prefix = 0
+    $plusMinusFound = $false
+
+    while ($r_prefix -lt $removedLineSplit.Length -and $a_prefix -lt $addedLineSplit.Length) {
+        $r = $removedLineSplit[$r_prefix]
+        $a = $addedLineSplit[$a_prefix]
+
+        if ($r -ceq $a) {
+            $r_prefix++
+            $a_prefix++
+        } elseif (!$plusMinusFound -and $r -eq "-" -and $a -eq "+") {
+            $r_prefix++
+            $a_prefix++
+            $plusMinusFound = $true
+        } else {
+            break
+        }
+    }
+
+    # Find common suffix
+    $r_suffix = $removedLineSplit.Length - 1
+    $a_suffix = $addedLineSplit.Length - 1
+
+    while ($r_suffix -ge $r_prefix -and $a_suffix -ge $a_prefix) {
+        $r = $removedLineSplit[$r_suffix]
+        $a = $addedLineSplit[$a_suffix]
+
+        if ($r -ceq $a) {
+            $r_suffix--
+            $a_suffix--
+        } else {
+            break
+        }
+    }
+
+    $removedLineHighlight = Set-LineHighlight $removedLineVis $r_prefix $r_suffix $removedTheme
+    $addedLineHighlight = Set-LineHighlight $addedLineVis $a_prefix $a_suffix $addedTheme
+
+    return [LinePair]@{
+        RemovedLine = $removedLineHighlight
+        AddedLine = $addedLineHighlight
+    }
+}
+
+function Set-HunkHighlight {
+    param (
+        [Hunk]$hunk,
+        [HighlightTheme]$removedTheme,
+        [HighlightTheme]$addedTheme
+    )
+
+    if (!$hunk.RemovedLines -or !$hunk.AddedLines) {
+        return $hunk
+    }
+
+    if ($hunk.RemovedLines.Count -ne $hunk.AddedLines.Count) {
+        return $hunk
+    }
+
+    $retHunk = New-Hunk
+
+    $i = 0
+    while ($i -lt $hunk.RemovedLines.Count) {
+        $pair = [LinePair]@{
+            RemovedLine = $hunk.RemovedLines[$i]
+            AddedLine = $hunk.AddedLines[$i]
+        }
+
+        $pair = Set-LinePairHighlight $pair $removedTheme $addedTheme
+
+        $retHunk.RemovedLines += $pair.RemovedLine
+        $retHunk.AddedLines += $pair.AddedLine
+
+        $i++
+    }
+
+    return $retHunk
+}
+
+function Write-Hunk {
+    param (
+        [Hunk]$hunk
+    )
+
+    foreach ($line in $hunk.RemovedLines) {
+        Write-Output $line
+    }
+
+    foreach ($line in $hunk.AddedLines) {
+        Write-Output $line
+    }
+}
+
+
+
+$addedTheme = [HighlightTheme]@{
+    NormalColor = Get-Color "39"
+    HighlightColor = Get-Color "39 on_4"
+}
+
+$removedTheme = [HighlightTheme]@{
+    NormalColor = Get-Color "13"
+    HighlightColor = Get-Color "13 on_5"
+}
+
+$inHunk = $false
+$hunk = New-Hunk
+
+foreach ($line in $input) {
+    if (!$inHunk) {
+        Write-Output $line
+        $inHunk = $line -match "^($COLOR_REGEX)*@@"
+    } elseif ($line -match "^($COLOR_REGEX)*-") {
+        $hunk.RemovedLines += $line
+    } elseif ($line -match "^($COLOR_REGEX)*\+") {
+        $hunk.AddedLines += $line
+    } else {
+        # This is the flush
+        $hunk = Set-HunkHighlight $hunk $removedTheme $addedTheme
+        foreach ($r_line in $hunk.RemovedLines) {
+            Write-Output $r_line
+        }
+
+        foreach ($a_line in $hunk.AddedLines) {
+            Write-Output $a_line
+        }
+        $hunk = New-Hunk
+        # End of flush
+
+        Write-Output $line
+		$inHunk = $line -match "^($COLOR_REGEX)*[\@ ]"
+    }
+}
