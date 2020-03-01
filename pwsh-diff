@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 
 param (
-    [Parameter(Mandatory=$true, ValueFromPipeline=$true)][string[]]$input
+    [Parameter(ValueFromPipeline=$true)][string[]]$input
 )
 
 $VERSION = "0.1.0"
