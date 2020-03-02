@@ -7,6 +7,12 @@ param (
 $VERSION = "0.1.0"
 $COLOR_REGEX = "\x1b\[[0-9;]*m"
 
+$GRAPH_REGEX =
+    "^(($COLOR_REGEX)?\|($COLOR_REGEX)?[ ])*" + # zero or more leading "|" with space
+     "($COLOR_REGEX)?\*($COLOR_REGEX)?[ ]"    + # a "*" with its trailing space
+    "(($COLOR_REGEX)?\|($COLOR_REGEX)?[ ])*"  + # zero or more trailing "|"
+                                     "[ ]*"     # trailing whitespace for merges
+
 class HighlightTheme {
     [string]$NormalColor
     [string]$HighlightColor
@@ -155,7 +161,7 @@ function Get-VisibleSubString {
     )
 
     $str = Get-VisibleString $str
-    return $str.Substring(0, $len)
+    return $str.Substring($len)
 }
 
 function Split-Line {
@@ -199,20 +205,45 @@ function Set-LinePairHighlight {
         [HighlightTheme]$addedTheme
     )
 
-    $removedLineVis = Get-VisibleString $lines.RemovedLine
-    $removedLineSplit = Split-Line $(Get-VisibleString $lines.RemovedLine)
+    $r_line = $lines.RemovedLine
+    $a_line = $lines.AddedLine
 
-    $addedLineVis = Get-VisibleString $lines.AddedLine
-    $addedLineSplit = Split-Line $(Get-VisibleString $lines.AddedLine)
+    # Every line at this point should have a leading +/-. Anything before that is part of the graph
+    # drawing; strip it off to preserve coloration, and re-attach later.
+    $r_graphPrefix = Select-String -InputObject $r_line -Pattern "^.*?(?=-)" `
+        | Select-Object -ExpandProperty Matches `
+        | Select-Object -First 1 `
+        | Select-Object -ExpandProperty Value
+
+    $a_graphPrefix = Select-String -InputObject $a_line -Pattern "^.*?(?=\+)" `
+        | Select-Object -ExpandProperty Matches `
+        | Select-Object -First 1 `
+        | Select-Object -ExpandProperty Value
+
+    if ($r_graphPrefix) {
+        $r_graphIndent = Measure-VisibleWidth $r_graphPrefix
+        $r_line = Get-VisibleSubString $r_line $r_graphIndent
+    }
+
+    if ($a_graphPrefix) {
+        $a_graphIndent = Measure-VisibleWidth $a_graphPrefix
+        $a_line = Get-VisibleSubString $a_line $a_graphIndent
+    }
+
+    $r_lineVis = Get-VisibleString $r_line
+    $r_lineSplit = Split-Line $r_lineVis
+
+    $a_lineVis = Get-VisibleString $a_line
+    $a_lineSplit = Split-Line $a_lineVis
 
     # Find common prefix
     $r_prefix = 0
     $a_prefix = 0
     $plusMinusFound = $false
 
-    while ($r_prefix -lt $removedLineSplit.Length -and $a_prefix -lt $addedLineSplit.Length) {
-        $r = $removedLineSplit[$r_prefix]
-        $a = $addedLineSplit[$a_prefix]
+    while ($r_prefix -lt $r_lineSplit.Length -and $a_prefix -lt $a_lineSplit.Length) {
+        $r = $r_lineSplit[$r_prefix]
+        $a = $a_lineSplit[$a_prefix]
 
         if ($r -ceq $a) {
             $r_prefix++
@@ -227,12 +258,12 @@ function Set-LinePairHighlight {
     }
 
     # Find common suffix
-    $r_suffix = $removedLineSplit.Length - 1
-    $a_suffix = $addedLineSplit.Length - 1
+    $r_suffix = $r_lineSplit.Length - 1
+    $a_suffix = $a_lineSplit.Length - 1
 
     while ($r_suffix -ge $r_prefix -and $a_suffix -ge $a_prefix) {
-        $r = $removedLineSplit[$r_suffix]
-        $a = $addedLineSplit[$a_suffix]
+        $r = $r_lineSplit[$r_suffix]
+        $a = $a_lineSplit[$a_suffix]
 
         if ($r -ceq $a) {
             $r_suffix--
@@ -242,12 +273,21 @@ function Set-LinePairHighlight {
         }
     }
 
-    $removedLineHighlight = Set-LineHighlight $removedLineVis $r_prefix $r_suffix $removedTheme
-    $addedLineHighlight = Set-LineHighlight $addedLineVis $a_prefix $a_suffix $addedTheme
+    $r_lineHighlight = Set-LineHighlight $r_lineVis $r_prefix $r_suffix $removedTheme
+    $a_lineHighlight = Set-LineHighlight $a_lineVis $a_prefix $a_suffix $addedTheme
+
+    # Prepend any previously-stripped graph bits.
+    if ($r_graphPrefix) {
+        $r_lineHighlight = $r_graphPrefix + $r_lineHighlight
+    }
+
+    if ($a_graphPrefix) {
+        $a_lineHighlight = $a_graphPrefix + $a_lineHighlight
+    }
 
     return [LinePair]@{
-        RemovedLine = $removedLineHighlight
-        AddedLine = $addedLineHighlight
+        RemovedLine = $r_lineHighlight
+        AddedLine = $a_lineHighlight
     }
 }
 
@@ -316,12 +356,44 @@ $inHunk = $false
 $hunk = New-Hunk
 
 foreach ($line in $input) {
+    # match a graph line that begins a commit
+
+    $line_noGraph = $line
+
+    $graph_prefix = Select-String -InputObject $line -Pattern $GRAPH_REGEX `
+        | Select-Object -ExpandProperty Matches `
+        | Select-Object -First 1 `
+        | Select-Object -ExpandProperty Value
+
+    if ($graph_prefix) {
+        # We must flush before setting graph indent, since the
+        # new commit may be indented differently from what we
+        # queued.
+        $hunk = Set-HunkHighlight $hunk $removedTheme $addedTheme
+        foreach ($r_line in $hunk.RemovedLines) {
+            Write-Output $r_line
+        }
+
+        foreach ($a_line in $hunk.AddedLines) {
+            Write-Output $a_line
+        }
+        $hunk = New-Hunk
+
+        $graph_indent = Measure-VisibleWidth $graph_prefix
+    } elseif ($graph_indent) {
+        if ($line.Length -lt $graph_indent) {
+            $graph_indent = 0;
+        } else {
+            $line_noGraph = Get-VisibleSubString $line $graph_indent
+        }
+    }
+
     if (!$inHunk) {
         Write-Output $line
-        $inHunk = $line -match "^($COLOR_REGEX)*@@"
-    } elseif ($line -match "^($COLOR_REGEX)*-") {
+        $inHunk = $line_noGraph -match "^($COLOR_REGEX)*@@"
+    } elseif ($line_noGraph -match "^($COLOR_REGEX)*-") {
         $hunk.RemovedLines += $line
-    } elseif ($line -match "^($COLOR_REGEX)*\+") {
+    } elseif ($line_noGraph -match "^($COLOR_REGEX)*\+") {
         $hunk.AddedLines += $line
     } else {
         # This is the flush
@@ -337,6 +409,6 @@ foreach ($line in $input) {
         # End of flush
 
         Write-Output $line
-		$inHunk = $line -match "^($COLOR_REGEX)*[\@ ]"
+        $inHunk = $line_noGraph -match "^($COLOR_REGEX)*[\@ ]"
     }
 }
