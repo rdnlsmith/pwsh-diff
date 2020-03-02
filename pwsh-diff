@@ -134,6 +134,23 @@ function Get-GitConfigBoolean {
     }
 }
 
+function Get-GitConfigColor {
+    param (
+        [string]$key,
+        [string]$default
+    )
+
+    $color = $(git config --get --type=color "$key")
+
+    # `git config` has a `--default` option, but it doesn't seem to like the
+    # output from `Get-Color`.
+    if (!$color) {
+        $color = Get-Color $default
+    }
+
+    return $color
+}
+
 function Get-VisibleString {
     param (
         [string]$str
@@ -343,13 +360,13 @@ function Write-Hunk {
 
 
 $addedTheme = [HighlightTheme]@{
-    NormalColor = Get-Color "39"
-    HighlightColor = Get-Color "39 on_4"
+    NormalColor = Get-GitConfigColor "color.diff-highlight.newNormal" "green bold"
+    HighlightColor = Get-GitConfigColor "color.diff-highlight.newHighlight" "green bold on_22"
 }
 
 $removedTheme = [HighlightTheme]@{
-    NormalColor = Get-Color "13"
-    HighlightColor = Get-Color "13 on_5"
+    NormalColor = Get-GitConfigColor "color.diff-highlight.oldNormal" "red bold"
+    HighlightColor = Get-GitConfigColor "color.diff-highlight.oldHighlight" "red bold on_52"
 }
 
 $inHunk = $false
