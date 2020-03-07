@@ -1,5 +1,10 @@
 # pwsh-diff
 
+> This project has been "soft-abandoned," because it turns out (perhaps unsurprisingly) that
+> `less`-for-Windows has the same limitations as Perl-for-Windows with respect to color control
+> codes, and there are really no other suitable pagers. I would consider resuming work on this, were
+> a decent Windows-native pager to appear; if you know something I don't, please open an issue!
+
 `pwsh-diff` aims to serve as a PowerShell-based alternative to
 [diff-highlight](https://github.com/git/git/tree/master/contrib/diff-highlight)
 (and, eventually,
@@ -7,8 +12,6 @@
 [don't seem](https://github.com/so-fancy/diff-so-fancy/issues/361)
 to
 [get along](https://github.com/microsoft/terminal/issues/4738) when it comes to ANSI coloring.
-
-This project is still in early development.
 
 ## Installation
 
